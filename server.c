@@ -157,9 +157,7 @@ void* physics_loop(void* arg) {
                     p->alive = 0; // Snake dies
                 } else {
                     // Check Fruit
-                    int grow = 0;
                     if (game_map[new_head.y][new_head.x] == FRUIT) {
-                        grow = 1;
                         p->length++;
                         spawn_fruit();
                     }
@@ -243,7 +241,8 @@ void* client_handler(void* arg) {
             players[i].active = 1;
             players[i].id = fd;
             players[i].color_id = i + 1; // 1-based color
-            strncpy(players[i].name, name_buffer, 31);
+            memcpy(players[i].name, name_buffer, 32);
+            players[i].name[31] = '\0';
             players[i].alive = 0; // Not alive until game starts
             printf("Player joined: %s (ID: %d)\n", players[i].name, fd);
             break;
