@@ -5,8 +5,8 @@
 #define HEIGHT          24
 #define WIDTH           80
 #define MAX_PLAYERS     8
-#define WIN_LENGTH      15      // Configurable Max Score
-#define TICK_RATE_US    100000  // 100ms = 10 FPS
+#define WIN_LENGTH      15000      // Configurable Max Score: Effectively: Last worm standing.
+#define TICK_RATE_US    200000  // 200ms = 20 FPS (100ms too fast, 200ms feels better).
 
 // Map Values
 #define EMPTY           0
