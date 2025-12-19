@@ -74,7 +74,7 @@ void reset_game() {
     for (int i = 0; i < MAX_PLAYERS; i++) {
         if (players[i].active) {
             players[i].alive = 1;
-            players[i].length = 3;
+            players[i].length = SNK_START_LEN;
             players[i].dir = UP;
             players[i].pending_dir = UP;
             
@@ -158,7 +158,7 @@ void* physics_loop(void* arg) {
                 } else {
                     // Check Fruit
                     if (game_map[new_head.y][new_head.x] == FRUIT) {
-                        p->length++;
+                        p->length = p->length + SNK_FRUIT_LEN;
                         spawn_fruit();
                     }
 

@@ -8,6 +8,12 @@
 #define WIN_LENGTH      15000      // Configurable Max Score: Effectively: Last worm standing.
 #define TICK_RATE_US    200000  // 200ms = 20 FPS (100ms too fast, 200ms feels better).
 
+// Initial length of each snake.
+#define SNK_START_LEN 8
+
+// Each fruit consumed adds x length to snake.
+#define SNK_FRUIT_LEN 2
+
 // Map Values
 #define EMPTY           0
 #define FRUIT           -111
