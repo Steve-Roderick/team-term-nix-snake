@@ -40,6 +40,7 @@ void init_colors() {
     init_pair(8, COLOR_RED, COLOR_BLUE);      // P8
     init_pair(9, COLOR_RED, COLOR_BLACK);     // Fruit
     init_pair(10, COLOR_WHITE, COLOR_BLACK);  // Wall
+    init_pair(11, COLOR_GREEN, COLOR_BLACK);  // Countdown
 }
 
 // --- Thread: Network Listener ---
@@ -101,12 +102,18 @@ void* server_listener(void* arg) {
                         attron(COLOR_PAIR(9));
                         mvaddch(y, x, 'O');
                         attroff(COLOR_PAIR(9));
-                    } else if (val > 0) {
-                        // Snake Body
+                    } else if (val > 0 && val <= MAX_PLAYERS) {
+                        // Snake Body in range [1, MAX_PLAYERS
                         attron(COLOR_PAIR(val));
                         mvaddch(y, x, ' '); // Color block
                         attroff(COLOR_PAIR(val));
+                    // Countdown logic before the game starts.
+                    } else if (val >= '0' && val <= '9') {
+                        attron(COLOR_PAIR(11));
+                        mvaddch(y, x, game_map[y][x]);
+                        attroff(COLOR_PAIR(11));
                     }
+
                 }
             }
             mvprintw(HEIGHT, 2, "Use WASD to Move. '.' to Quit.");

@@ -6,7 +6,13 @@
 #define WIDTH           80
 #define MAX_PLAYERS     8
 #define WIN_LENGTH      15000      // Configurable Max Score: Effectively: Last worm standing.
-#define TICK_RATE_US    200000  // 200ms = 20 FPS (100ms too fast, 200ms feels better).
+                                   
+#define TICK_RATE_US    200000   // 200ms = 20 FPS (100ms too fast, 200ms feels better).
+
+// Countdown from 9 to 0 on game start.
+// Two frames per count and the final frame is the first real in-game frame so:
+// (10 + 1) * 2.
+#define CNT_DOWN_FRAMES 22
 
 // Initial length of each snake.
 #define SNK_START_LEN 8

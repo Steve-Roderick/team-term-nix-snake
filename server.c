@@ -33,6 +33,7 @@ Player          players[MAX_PLAYERS];
 int             game_state = STATE_WAITING;
 int             winner_id = 0;
 pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
+size_t frameCnt = 0;
 
 // --- Helper Functions ---
 
@@ -60,6 +61,7 @@ void spawn_fruit() {
 void reset_game() {
     init_map();
     winner_id = 0;
+    frameCnt = 0;
     // Spawn random obstacles
     for(int i=0; i<5; i++) {
         int r_y = rand() % (HEIGHT - 4) + 2;
@@ -99,12 +101,18 @@ void reset_game() {
 
 // --- Thread: Physics Engine ---
 void* physics_loop(void* arg) {
+
     while (1) {
         usleep(TICK_RATE_US);
-        
+        frameCnt++;
+
+        int active_count = 0;
+        int alive_count = 0;
+
         pthread_mutex_lock(&state_mutex);
         
         if (game_state == STATE_RUNNING) {
+
             // 1. Clear old snake positions from map
             // We rebuild the map dynamic parts every tick to avoid ghosting
             for(int y=0; y<HEIGHT; y++) {
@@ -112,11 +120,26 @@ void* physics_loop(void* arg) {
                     if (game_map[y][x] > 0) game_map[y][x] = 0; // Clear snake bodies
                 }
             }
+            int was = 0;
+            // Countdown runs from 9 to 0.
+            if (frameCnt <= CNT_DOWN_FRAMES) {
+                if (frameCnt == 1) {
+                    // Remember tile value so we can reset
+                    was = game_map[HEIGHT / 2 + 1][WIDTH / 2 + 1];
+                }
+                if (frameCnt % 2) {
+                    // Update and decrement countdown every other frame.
+                    game_map[HEIGHT / 2 + 1][WIDTH / 2 + 1] = (int) '9' - (frameCnt / 2) + 1;
+                }
+                if (frameCnt == CNT_DOWN_FRAMES) {
+                    // On final frame reset original value.
+                    game_map[HEIGHT / 2 + 1][WIDTH / 2 + 1] = was;
+                }
+                //  Skip the move snakes and collisions.
+                goto REDRAW;
+            }
 
             // 2. Move Snakes
-            int active_count = 0;
-            int alive_count = 0;
-
             for (int i = 0; i < MAX_PLAYERS; i++) {
                 if (!players[i].active) continue;
                 active_count++;
@@ -176,6 +199,7 @@ void* physics_loop(void* arg) {
                 }
             }
 
+REDRAW:
             // 3. Re-draw valid snakes onto map
             for (int i = 0; i < MAX_PLAYERS; i++) {
                 if (players[i].active && players[i].alive) {
