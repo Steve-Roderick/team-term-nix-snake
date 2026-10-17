@@ -51,6 +51,7 @@ static void init_colors(void) {
         init_pair((short)(i + 1), i == 7 ? COLOR_WHITE : COLOR_BLACK, palette[i]);
     init_pair(9, COLOR_RED, COLOR_BLACK);
     init_pair(10, COLOR_YELLOW, COLOR_BLACK);
+    init_pair(11, COLOR_YELLOW, COLOR_MAGENTA); /* Distinct from every body palette. */
 }
 static void player_line(const Frame *f, int i, int row) {
     const PlayerView *p = &f->players[i];
@@ -128,16 +129,17 @@ static void draw(const Frame *f, int received) {
         for (int y = 0; y < view_h; ++y) for (int x = 0; x < view_w; ++x) {
             int value = f->map[y + oy][x + ox], pair = 0;
             chtype glyph = ' ';
-            if (value == BORDER) glyph = '#';
-            else if (value == WALL) glyph = ACS_CKBOARD;
+            if (value == BORDER) glyph = ':';
             else if (value == FRUIT) { glyph = 'O'; pair = 9; }
             else if (value == BERRY) { glyph = '*'; pair = 10; }
             else if (value > 0 && value <= MAX_PLAYERS) {
                 const PlayerView *p = &f->players[value - 1];
                 pair = (int)p->color;
                 glyph = (chtype)('0' + value);
-                if (p->head_x == (uint32_t)(x + ox) && p->head_y == (uint32_t)(y + oy))
+                if (p->head_x == (uint32_t)(x + ox) && p->head_y == (uint32_t)(y + oy)) {
                     glyph = p->pacman ? 'C' : '@';
+                    if (p->pacman) { pair = 11; glyph |= A_BOLD; }
+                }
             }
             if (colors && pair) attron(COLOR_PAIR(pair));
             mvaddch(y + 1, x, glyph);
@@ -150,7 +152,7 @@ static void draw(const Frame *f, int received) {
         line(row++, 0, local_mode ? "P pause/resume | +/- speed | . quit" :
              "WASD/arrows move | P pause/resume | +/- speed | . quit");
         for (int i = 0; i < MAX_PLAYERS; ++i) if (f->players[i].active) player_line(f, i, row++);
-        line(row, 0, "O apple: 2x/10 ticks | * berry: Pacman/30 ticks");
+        line(row, 0, "Edges wrap | O: 2x/10 ticks | *: Pacman/30 ticks");
         if (view_h < HEIGHT || view_w < WIDTH) append(" | scrolling view");
     }
     refresh();

@@ -18,13 +18,13 @@
 #define BOOST_TICKS 10
 #define PACMAN_TICKS 30
 #define RESPAWN_TICKS 10
+#define SPAWN_CLEAR_TICKS 10
 #define APPLE_COUNT 5
 #define BERRY_COUNT 2
 
 #define EMPTY 0
 #define FRUIT -111
 #define BERRY -112
-#define WALL -999
 #define BORDER -99
 
 #define STATE_WAITING 0

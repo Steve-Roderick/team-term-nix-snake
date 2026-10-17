@@ -28,7 +28,16 @@ static void snake(int id, int x, int y, int length, direction d) {
         if (d == LEFT) ++x;
         if (d == UP) ++y;
         if (d == DOWN) --y;
+        if (x == 0) x = WIDTH - 2;
+        if (x == WIDTH - 1) x = 1;
+        if (y == 0) y = HEIGHT - 2;
+        if (y == HEIGHT - 1) y = 1;
     }
+}
+static void lethal_snake(int id, int x, int y) {
+    snake(id, x, y, 8, RIGHT);
+    const Point shape[] = {{0,0}, {0,1}, {1,1}, {1,0}, {2,0}, {2,1}, {3,1}, {3,0}};
+    for (int b = 0; b < 8; ++b) g.players[id].body[b] = (Point){x + shape[b].x, y + shape[b].y};
 }
 static void collision_scene(void) {
     setup(2);
@@ -46,7 +55,7 @@ static void assert_valid(void) {
         for (int b = 0; b < p->length; ++b) {
             Point pos = p->body[b];
             assert(pos.x > 0 && pos.x < WIDTH - 1 && pos.y > 0 && pos.y < HEIGHT - 1);
-            assert(g.terrain[pos.y][pos.x] != WALL);
+            assert(g.terrain[pos.y][pos.x] == EMPTY);
             assert(map[pos.y][pos.x] == 0 || map[pos.y][pos.x] == i + 1);
             map[pos.y][pos.x] = i + 1;
         }
@@ -139,8 +148,8 @@ static void test_boost(void) {
     /* Refresh during a boosted tick, including eating on the second substep. */
     g.players[0].boost = 1; g.terrain[10][34] = FRUIT; tick();
     assert(g.players[0].boost == BOOST_TICKS && g.players[0].score == 4);
-    /* Fast snakes still check intervening walls. */
-    g.terrain[10][35] = WALL; tick(); assert(!g.players[0].alive);
+    /* Fast snakes still check intervening body segments. */
+    lethal_snake(0, 34, 10); tick(); assert(!g.players[0].alive);
     assert(g.players[0].boost == 0 && g.players[0].score == 3);
     /* The same pair cannot be bitten twice in one boosted tick. */
     collision_scene(); g.players[0].boost = 1; g.players[0].pacman = 2; tick();
@@ -166,7 +175,7 @@ static void test_pause_speed_input(void) {
     assert(g.players[0].body[0].y == 9);
 }
 static void test_death_respawn_modes(void) {
-    setup(1); snake(0, 1, 10, 8, LEFT); g.players[0].score = 17; tick();
+    setup(1); lethal_snake(0, 10, 10); g.players[0].score = 17; tick();
     assert(!g.players[0].alive && g.players[0].score == 12);
     assert(g.state == STATE_RUNNING && g.players[0].respawn == RESPAWN_TICKS);
     for (int t = 1; t < RESPAWN_TICKS; ++t) { tick(); assert(!g.players[0].alive); }
@@ -175,12 +184,12 @@ static void test_death_respawn_modes(void) {
     /* If the board is full, retry later without hanging or overwriting it. */
     setup(1); g.players[0].participating = 1; g.players[0].respawn = 1;
     for (int y = 1; y < HEIGHT - 1; ++y)
-        for (int x = 1; x < WIDTH - 1; ++x) g.terrain[y][x] = WALL;
-    tick(); assert(!g.players[0].alive && g.players[0].respawn == 1);
+        for (int x = 1; x < WIDTH - 1; ++x) g.terrain[y][x] = FRUIT;
+    game_tick(&g); assert(!g.players[0].alive && g.players[0].respawn == 1);
     for (int x = 1; x < WIDTH - 1; ++x) g.terrain[10][x] = EMPTY;
     tick(); assert(g.players[0].alive); assert_valid();
     setup(2); g.mode = MODE_LAST_STANDING;
-    snake(0, 1, 10, 8, LEFT); snake(1, 30, 15, 8, RIGHT); tick();
+    lethal_snake(0, 10, 10); snake(1, 30, 15, 8, RIGHT); tick();
     assert(g.state == STATE_GAME_OVER && g.winner == 1 && !g.players[0].respawn);
     for (int t = 0; t < 30; ++t) tick();
     assert(!g.players[0].alive);
@@ -188,11 +197,11 @@ static void test_death_respawn_modes(void) {
     assert(g.state == STATE_RUNNING && g.players[0].alive && g.players[0].color == 3);
     /* An eliminated player stays dead even while other players keep the round alive. */
     setup(3); g.mode = MODE_LAST_STANDING;
-    snake(0, 1, 10, 8, LEFT); snake(1, 10, 15, 8, RIGHT); snake(2, 10, 20, 8, RIGHT);
+    lethal_snake(0, 10, 10); snake(1, 10, 15, 8, RIGHT); snake(2, 10, 20, 8, RIGHT);
     for (int t = 0; t < RESPAWN_TICKS + 1; ++t) tick();
     assert(g.state == STATE_RUNNING && !g.players[0].alive && !g.players[0].respawn);
     setup(2); g.mode = MODE_LAST_STANDING;
-    snake(0, 1, 10, 8, LEFT); snake(1, 78, 15, 8, RIGHT); tick();
+    lethal_snake(0, 10, 10); lethal_snake(1, 30, 15); tick();
     assert(g.state == STATE_GAME_OVER && g.winner == -1);
     setup(2); g.mode = MODE_LAST_STANDING;
     snake(0, 10, 10, 8, RIGHT); snake(1, 30, 15, 8, RIGHT);
@@ -229,6 +238,66 @@ static void test_capacity(void) {
     collision_scene(); g.players[1].score = INT_MAX - 1; tick();
     assert(g.players[1].score == INT_MAX);
 }
+static void test_wrap(void) {
+    const Point heads[] = {{10,1}, {10,HEIGHT-2}, {1,10}, {WIDTH-2,10}};
+    const Point destinations[] = {{10,HEIGHT-2}, {10,1}, {WIDTH-2,10}, {1,10}};
+    for (int d = UP; d <= RIGHT; ++d) {
+        setup(1); snake(0, heads[d].x, heads[d].y, 8, (direction)d);
+        tick();
+        assert(g.players[0].alive && g.players[0].length == 8);
+        assert(g.players[0].body[0].x == destinations[d].x && g.players[0].body[0].y == destinations[d].y);
+        assert(g.players[0].body[1].x == heads[d].x && g.players[0].body[1].y == heads[d].y);
+        assert_valid();
+        tick(); assert(g.players[0].alive); assert_valid();
+    }
+    setup(1); snake(0, WIDTH-2, 10, 8, RIGHT);
+    g.players[0].boost = 1; g.terrain[10][1] = FRUIT; tick();
+    assert(g.players[0].body[0].x == 2 && g.players[0].score == 2 && g.players[0].boost == BOOST_TICKS);
+    /* Body contacts still resolve on the far side of a portal. */
+    setup(2); snake(0, 1, 10, 8, LEFT); snake(1, WIDTH-2, 8, 8, UP); tick();
+    assert(g.players[0].length == 4 && g.players[1].length == 12); assert_valid();
+    setup(2); snake(0, 1, 10, 8, LEFT); snake(1, WIDTH-2, 8, 8, UP);
+    g.players[0].pacman = 2; tick();
+    assert(g.players[0].length == 12 && g.players[1].length == 4); assert_valid();
+    /* A reversed body crossing the seam must face away, not into itself. */
+    setup(2); snake(0, 1, 10, 4, RIGHT); snake(1, 2, 8, 8, UP); tick();
+    assert(g.players[0].length == 2 && g.players[0].body[0].x == WIDTH-2 && g.players[0].dir == LEFT);
+    tick(); assert(g.players[0].body[0].x == WIDTH-3); assert_valid();
+    /* A boosted snake cannot skip a body on the first wrapped substep. */
+    setup(2); snake(0, WIDTH-2, 10, 8, RIGHT); snake(1, 1, 8, 8, UP);
+    g.players[0].boost = 1; tick();
+    assert(g.players[0].length == 4 && g.players[1].length == 12); assert_valid();
+}
+static void test_safe_spawns(void) {
+    for (int seed = 0; seed < 100; ++seed) {
+        srand((unsigned int)seed);
+        game_init(&g);
+        for (int i = 0; i < MAX_PLAYERS; ++i) game_join(&g, "Spawn");
+        game_input(&g, 0, START_KEY);
+        g.countdown = 0;
+        no_food();
+        for (int i = 0; i < MAX_PLAYERS; ++i) {
+            assert(g.players[i].alive);
+            g.players[i].boost = BOOST_TICKS; /* Worst-case two steps per tick. */
+        }
+        for (int t = 0; t < SPAWN_CLEAR_TICKS; ++t) {
+            tick(); assert_valid();
+            for (int i = 0; i < MAX_PLAYERS; ++i)
+                assert(g.players[i].alive && g.players[i].length == SNK_START_LEN);
+        }
+        /* Respawn among seven moving snakes with separate, predictable lanes. */
+        setup(MAX_PLAYERS);
+        for (int i = 0; i < MAX_PLAYERS; ++i) snake(i, 40, 2 + i * 2, 8, RIGHT);
+        g.players[0].alive = 0; g.players[0].respawn = 1;
+        tick(); assert(g.players[0].alive);
+        for (int i = 0; i < MAX_PLAYERS; ++i) g.players[i].boost = BOOST_TICKS;
+        for (int t = 0; t < SPAWN_CLEAR_TICKS; ++t) {
+            tick(); assert_valid();
+            for (int i = 0; i < MAX_PLAYERS; ++i)
+                assert(g.players[i].alive && g.players[i].length == SNK_START_LEN);
+        }
+    }
+}
 static void test_protocol(void) {
     Frame f = { .magic = PROTOCOL_MAGIC, .version = PROTOCOL_VERSION, .self = 1,
                 .state = STATE_RUNNING, .tps = DEFAULT_TPS, .host = 1, .target = WIN_SCORE };
@@ -259,7 +328,7 @@ static void test_random_games(void) {
 int main(void) {
     srand(42);
     test_lobby(); test_collision(); test_pacman(); test_boost(); test_pause_speed_input();
-    test_death_respawn_modes(); test_self_collision(); test_capacity(); test_protocol(); test_random_games();
+    test_death_respawn_modes(); test_self_collision(); test_capacity(); test_wrap(); test_safe_spawns(); test_protocol(); test_random_games();
     puts("Game rules, protocol and 100,000 simulated ticks passed.");
     return 0;
 }

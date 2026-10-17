@@ -54,6 +54,52 @@ def until(sock, predicate, seconds=3):
     raise AssertionError("expected server state was not reached")
 
 
+def force_self_collision(sock, player):
+    """Turn into the snake's own neck; edges now wrap rather than killing it."""
+    directions = [(0, -1, b"W"), (1, 0, b"D"), (0, 1, b"S"), (-1, 0, b"A")]
+    def advance(x, y, d):
+        dx, dy, _ = directions[d]
+        return (x - 1 + dx) % 78 + 1, (y - 1 + dy) % 22 + 1
+    for _ in range(10):
+        until(sock, lambda f: not f["countdown"] and f["players"][player]["alive"]
+              and not f["players"][player]["boost"], seconds=5)
+        sock.sendall(b"P--------------------")
+        state = until(sock, lambda f: f["paused"] and f["tps"] == 2)
+        p = state["players"][player]
+        route = None
+        if not p["boost"]:
+            for behind in range(4):
+                x, y = advance(p["x"], p["y"], behind)
+                if state["map"][y * 80 + x] != player + 1:
+                    continue
+                heading = (behind + 2) % 4
+                for rotation in (-1, 1):
+                    x, y = p["x"], p["y"]
+                    turns = [(heading + rotation * t) % 4 for t in (1, 2, 3)]
+                    cells = []
+                    for d in turns:
+                        x, y = advance(x, y, d)
+                        cells.append(state["map"][y * 80 + x])
+                    if cells == [0, 0, player + 1]:
+                        route = turns
+                        break
+                if route:
+                    break
+        if route:
+            # Keep the paused snapshot's tick and apply each turn on its own tick.
+            sock.sendall(directions[route[0]][2] + b"P")
+            state = until(sock, lambda f: f["tick"] > state["tick"])
+            for d in route[1:]:
+                sock.sendall(directions[d][2])
+                state = until(sock, lambda f: f["tick"] > state["tick"])
+            assert not state["players"][player]["alive"]
+            sock.sendall(b"++++++++++++++++++++")
+            return state
+        sock.sendall(b"P++++++++++++++++++++")
+        until(sock, lambda f: f["tick"] > state["tick"])
+    raise AssertionError("could not find a clear self-collision route")
+
+
 def connect(port, name="Tester", fragments=False, commands=b""):
     sock = socket.create_connection(("127.0.0.1", port), timeout=2)
     hello = struct.pack("!II32s", MAGIC, VERSION, name.encode()[:31])
@@ -125,10 +171,7 @@ def test_lobby_and_game():
         replacement.sendall(b".")
         until(guest, lambda f: not f["players"][0]["active"])
         # Max-score deaths automatically respawn while the score round continues.
-        guest.sendall(b"P")
-        state = until(guest, lambda f: f["paused"])
-        guest.sendall(b"P")
-        until(guest, lambda f: not f["players"][1]["alive"], seconds=5)
+        force_self_collision(guest, 1)
         state = until(guest, lambda f: f["players"][1]["alive"], seconds=3)
         assert state["players"][1]["length"] == 8 and state["state"] == 1
 
@@ -177,6 +220,7 @@ def test_last_worm_standing():
         late = stack.enter_context(connect(port, "Spectator"))
         state = frame(late)
         assert not state["players"][2]["participating"] and not state["players"][2]["alive"]
+        force_self_collision(guest, 1)
         state = until(host, lambda f: f["state"] == 2, seconds=6)
         assert sum(p["alive"] for p in state["players"]) <= 1
         assert all(p["respawn"] == 0 for p in state["players"])
@@ -233,9 +277,52 @@ def test_terminal_client():
             os.close(master)
 
 
+def test_pacman_head_colour():
+    # Feed a known scene to the real terminal client and inspect its colour output.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(3)
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 0, 0))
+        proc = subprocess.Popen([str(ROOT / "client"), "127.0.0.1", str(listener.getsockname()[1])],
+                                stdin=slave, stdout=slave, stderr=slave,
+                                env={**os.environ, "TERM": "xterm-256color"})
+        os.close(slave)
+        try:
+            pty_read(master, b"Enter Username")
+            os.write(master, b"ColourTest\n")
+            peer, _ = listener.accept()
+            with peer:
+                peer.settimeout(3)
+                exact(peer, 40)
+                def scene(power):
+                    header = struct.pack("!12I", MAGIC, VERSION, 1, 1, 0, 1, 0, 1, 5, 0, 1, 150)
+                    player = struct.pack("!11I32s", 1, 1, 1, 5, 2, 0, 0, power, 0, 10, 10, b"ColourTest")
+                    board = [0] * 1920
+                    board[10 * 80 + 10] = board[10 * 80 + 9] = 1
+                    return header + player + bytes(7 * 76) + struct.pack("!1920i", *board) + bytes(32)
+                peer.sendall(scene(30))
+                output = pty_read(master, b"Pacman:30")
+                assert b"\x1b[33m" in output and b"\x1b[45m" in output and b"C" in output
+                assert b"\x1b[0;1m" in output, "Pacman head must also be bold"
+                peer.sendall(scene(0))
+                output = pty_read(master, b"@")
+                assert b"\x1b[30m" in output, "Expired head must regain its body colour"
+                os.write(master, b".")
+                proc.wait(timeout=3)
+                assert proc.returncode == 0
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=3)
+            os.close(master)
+
+
 if __name__ == "__main__":
     test_lobby_and_game()
     test_full_bad_and_slow_connections()
     test_last_worm_standing()
     test_terminal_client()
+    test_pacman_head_colour()
     print("TCP framing, shared controls, respawn, host transfer, slow clients and ncurses PTY passed.")

@@ -5,7 +5,6 @@
 #include <string.h>
 
 static int same(Point a, Point b) { return a.x == b.x && a.y == b.y; }
-static int inside(Point p) { return p.x > 0 && p.x < WIDTH - 1 && p.y > 0 && p.y < HEIGHT - 1; }
 static direction opposite(direction d) {
     static const direction dirs[] = { DOWN, UP, RIGHT, LEFT };
     return dirs[d];
@@ -15,6 +14,10 @@ static Point step(Point p, direction d) {
     if (d == DOWN) ++p.y;
     if (d == LEFT) --p.x;
     if (d == RIGHT) ++p.x;
+    if (p.x == 0) p.x = WIDTH - 2;
+    if (p.x == WIDTH - 1) p.x = 1;
+    if (p.y == 0) p.y = HEIGHT - 2;
+    if (p.y == HEIGHT - 1) p.y = 1;
     return p;
 }
 static void clear_map(Game *g) {
@@ -33,29 +36,47 @@ void game_render(const Game *g, int map[HEIGHT][WIDTH]) {
                 map[p->body[b].y][p->body[b].x] = i + 1;
     }
 }
-/* Bounded exhaustive search, including the entire body and one clear step ahead. */
+/* Reserve current bodies and straight-ahead routes for ten ticks, allowing
+   two steps per tick in case an apple boosts either snake. Search is bounded;
+   a crowded arena delays respawn rather than placing a snake in danger. */
 static int spawn(Game *g, Player *p) {
     int map[HEIGHT][WIDTH];
     game_render(g, map);
-    int start = rand() % MAX_LENGTH;
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        const Player *other = &g->players[i];
+        if (!other->active || !other->alive) continue;
+        Point ahead = other->body[0];
+        for (int t = 0; t < 2 * (SPAWN_CLEAR_TICKS + 1); ++t) {
+            ahead = step(ahead, other->pending_dir);
+            map[ahead.y][ahead.x] = i + 1;
+        }
+    }
+    int start = rand() % MAX_LENGTH, first_dir = rand() % 4;
     for (int k = 0; k < MAX_LENGTH; ++k) {
         int cell = (start + k) % MAX_LENGTH;
         Point head = { cell % (WIDTH - 2) + 1, cell / (WIDTH - 2) + 1 };
-        for (int d = UP; d <= RIGHT; ++d) {
-            Point body[SNK_START_LEN], ahead = step(head, (direction)d);
-            if (!inside(ahead) || map[ahead.y][ahead.x] != EMPTY) continue;
-            Point pos = head;
+        for (int trial = 0; trial < 4; ++trial) {
+            direction d = (direction)((first_dir + trial) % 4);
+            Point body[SNK_START_LEN], pos = head;
             int safe = 1;
             for (int b = 0; b < SNK_START_LEN; ++b) {
-                if (!inside(pos) || map[pos.y][pos.x] != EMPTY) { safe = 0; break; }
+                if (map[pos.y][pos.x] != EMPTY) { safe = 0; break; }
                 body[b] = pos;
-                pos = step(pos, opposite((direction)d));
+                pos = step(pos, opposite(d));
+            }
+            if (!safe) continue;
+            pos = head;
+            for (int t = 0; t < 2 * SPAWN_CLEAR_TICKS && safe; ++t) {
+                pos = step(pos, d);
+                if (map[pos.y][pos.x] != EMPTY) safe = 0;
+                for (int b = 0; b < SNK_START_LEN; ++b)
+                    if (same(pos, body[b])) safe = 0;
             }
             if (!safe) continue;
             memcpy(p->body, body, sizeof(body));
             p->length = SNK_START_LEN;
             p->alive = 1;
-            p->dir = p->pending_dir = (direction)d;
+            p->dir = p->pending_dir = d;
             p->boost = p->pacman = p->respawn = 0;
             return 1;
         }
@@ -158,20 +179,6 @@ static void start_round(Game *g) {
         Player *p = &g->players[i];
         if (p->active) { if (!spawn(g, p)) p->respawn = 1; ++g->starters; }
     }
-    int map[HEIGHT][WIDTH];
-    game_render(g, map);
-    for (int k = 0; k < 5; ++k) {
-        int x = rand() % (WIDTH - 4) + 2, y = rand() % (HEIGHT - 4) + 2;
-        if (map[y][x] || map[y][x + 1]) continue;
-        int safe = 1;
-        for (int i = 0; i < MAX_PLAYERS; ++i) {
-            Player *p = &g->players[i];
-            if (!p->active || !p->alive) continue;
-            Point ahead = step(p->body[0], p->dir);
-            if (ahead.y == y && (ahead.x == x || ahead.x == x + 1)) safe = 0;
-        }
-        if (safe) g->terrain[y][x] = g->terrain[y][x + 1] = WALL;
-    }
     replenish(g);
     g->state = STATE_RUNNING;
 }
@@ -220,10 +227,11 @@ static void bounce(Player *p) {
     direction d = opposite(p->dir);
     for (int b = 1; b < p->length; ++b) {
         if (same(p->body[0], p->body[b])) continue;
-        if (p->body[0].x < p->body[b].x) d = LEFT;
-        else if (p->body[0].x > p->body[b].x) d = RIGHT;
-        else if (p->body[0].y < p->body[b].y) d = UP;
-        else d = DOWN;
+        for (int candidate = UP; candidate <= RIGHT; ++candidate)
+            if (same(step(p->body[b], (direction)candidate), p->body[0])) {
+                d = (direction)candidate;
+                break;
+            }
         break;
     }
     p->dir = p->pending_dir = d;
@@ -240,7 +248,6 @@ static void move_step(Game *g, const int moving[MAX_PLAYERS],
         next[i] = p->body[0];
         if (!p->active || !p->alive || !moving[i]) continue;
         next[i] = step(p->body[0], p->dir);
-        if (!inside(next[i]) || g->terrain[next[i].y][next[i].x] == WALL) { fatal[i] = 1; continue; }
         /* The tail vacates this step unless eating (growth retains it). */
         int keep_tail = g->terrain[next[i].y][next[i].x] == FRUIT;
         for (int b = 0; b < p->length - !keep_tail; ++b)

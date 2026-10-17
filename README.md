@@ -49,15 +49,18 @@ The first player becomes host. If the host disconnects, a remaining player takes
 
 Speed ranges from **2–20 ticks per second**, with a default of **5**. Pause freezes movement, the starting countdown, power-up timers, and respawn timers. The HUD shows each player's length and score, your power-up/respawn timers, and the shared speed and pause state.
 
-A terminal of **80 columns × 37 rows** shows the full arena and all eight players. Smaller terminals (minimum 60 × 20) scroll the arena around your snake and keep the controls and scoreboard visible. Heads are `@`, powered heads are `C`, and body segments show player numbers so players remain distinguishable even with the same colour or without colour support.
+A terminal of **80 columns × 37 rows** shows the full arena and all eight players. Smaller terminals (minimum 60 × 20) scroll the arena around your snake and keep the controls and scoreboard visible. Heads are `@`, powered heads are bold yellow-on-magenta `C` characters, and body segments show player numbers so players remain distinguishable even with the same colour or without colour support.
 
 ## Rules
 
+- **Wraparound arena:** there are no internal walls. Crossing any edge places your head on the opposite edge in that same movement step; the rest of the body follows segment by segment. The dotted outline marks the wrap boundary, not a wall.
+- **Safer starts and respawns:** placement checks the entire body and 20 clear movement steps ahead (about 10 ticks even with an apple boost), and avoids other snakes' projected straight-ahead routes. If no safe route exists, respawning waits and retries. Players changing direction can still create collisions.
+
 - **Normal snake collisions:** if your head hits another snake, you lose half your length and the other snake gains that length and score. The losing snake turns around, and both snakes stop for that movement step so they do not overlap. Odd lengths transfer the rounded-down half; a one-segment snake dies on contact.
-- **Apples (`O`):** add **2 length and 2 score**, then move you **twice per tick for the next 10 ticks**. Every movement step checks collisions and food, so boosts cannot tunnel through walls or snakes. Another apple refreshes the timer to 10.
-- **Pacman berries (`*`):** let you eat other snakes on contact for **30 ticks**. You gain half the victim's length and that much score, and the victim shrinks and turns around. Berries refresh the timer; they do not add length themselves. Walls and your own body still kill you.
+- **Apples (`O`):** add **2 length and 2 score**, then move you **twice per tick for the next 10 ticks**. Every movement step checks collisions and food, so boosts cannot tunnel through snakes or skip collisions across an edge. Another apple refreshes the timer to 10.
+- **Pacman berries (`*`):** let you eat other snakes on contact for **30 ticks**. You gain half the victim's length and that much score, and the victim shrinks and turns around. Berries refresh the timer; they do not add length themselves. Your own body still kills you.
 - **Simultaneous contact:** a single powered snake wins a head-on collision. With equal power, head-on collisions halve both snakes and award no points; equal power in a head-to-body collision uses the normal collision rule. A pair can transfer length only once per tick. If multiple snakes eat the same victim simultaneously, they share its lost half equally (any remainder is discarded).
-- **Death:** hitting a border, wall, or your own body kills you and removes **25% of your score, rounded up**. Score never goes below zero. Moving into your own vacating tail is allowed.
+- **Death:** hitting your own body kills you and removes **25% of your score, rounded up**. Score never goes below zero. Moving into your own vacating tail is allowed.
 - **Score:** starts at zero and tracks length gained from apples and other snakes, minus death penalties. Losing length in a collision does not remove score. Starting and respawn lengths do not award points.
 
 ### Max score
