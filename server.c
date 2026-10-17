@@ -1,379 +1,155 @@
+#define _POSIX_C_SOURCE 200809L
+#include <arpa/inet.h>
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <arpa/inet.h>
-#include <signal.h>
+#include <sys/socket.h>
 #include <time.h>
-#include "game_config.h"
+#include <unistd.h>
+#include "game_view.h"
+#include "protocol.h"
 
-// --- Structures ---
+#define MAX_CONNECTIONS (MAX_PLAYERS * 2)
+#define CONNECTION_TIMEOUT_MS 5000
+#define BROADCAST_MS 50
+
 typedef struct {
-    int x, y;
-} point;
+    int fd, player;
+    Hello hello;
+    size_t hello_used, sent, queued;
+    Frame output;
+    long long connected_at, queued_at;
+} Connection;
+static Game game;
+static Connection clients[MAX_CONNECTIONS];
+static volatile sig_atomic_t running = 1;
+static void stop(int sig) { (void)sig; running = 0; }
 
-typedef struct {
-    int id;                 // Socket FD
-    int active;
-    char name[32];
-    int color_id;           // 1-8
-    
-    // Snake State
-    int length;
-    point body[HEIGHT * WIDTH]; // Simple array for body parts
-    direction dir;
-    direction pending_dir;  // Input buffer to prevent 180 turns in one tick
-    int alive;
-} Player;
-
-// --- Global State ---
-int             game_map[HEIGHT][WIDTH];
-Player          players[MAX_PLAYERS];
-int             game_state = STATE_WAITING;
-int             winner_id = 0;
-pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
-size_t frameCnt = 0;
-
-// --- Helper Functions ---
-
-void init_map() {
-    memset(game_map, 0, sizeof(game_map));
-    for (int i = 0; i < HEIGHT; i++) {
-        game_map[i][0] = game_map[i][WIDTH - 1] = BORDER;
-    }
-    for (int i = 0; i < WIDTH; i++) {
-        game_map[0][i] = game_map[HEIGHT - 1][i] = BORDER;
-    }
+static void disconnect_client(Connection *c) {
+    if (c->fd < 0) return;
+    if (c->player >= 0) game_leave(&game, c->player);
+    close(c->fd);
+    memset(c, 0, sizeof(*c));
+    c->fd = c->player = -1;
 }
-
-void spawn_fruit() {
-    int x, y, attempts = 0;
-    do {
-        y = rand() % (HEIGHT - 2) + 1;
-        x = rand() % (WIDTH - 2) + 1;
-        attempts++;
-    } while (game_map[y][x] != 0 && attempts < 100);
-    
-    if (game_map[y][x] == 0) game_map[y][x] = FRUIT;
+static void queue_frame(Connection *c, long long now) {
+    if (c->player < 0 || c->queued) return;
+    Frame *f = &c->output;
+    game_snapshot(&game, c->player, f);
+    frame_encode(f);
+    c->sent = 0; c->queued = sizeof(*f); c->queued_at = now;
 }
-
-void reset_game() {
-    init_map();
-    winner_id = 0;
-    frameCnt = 0;
-    // Spawn random obstacles
-    for(int i=0; i<5; i++) {
-        int r_y = rand() % (HEIGHT - 4) + 2;
-        int r_x = rand() % (WIDTH - 4) + 2;
-        game_map[r_y][r_x] = WALL;
-        game_map[r_y][r_x+1] = WALL; // Small wall segments
+static void receive_input(Connection *c) {
+    unsigned char buffer[256];
+    /* Bound work per poll iteration, so input flooding cannot starve physics. */
+    ssize_t n = recv(c->fd, buffer, sizeof(buffer), 0);
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+        disconnect_client(c); return;
     }
-    // Spawn Fruits
-    for(int i=0; i<5; i++) spawn_fruit();
-
-    // Reset snakes
-    for (int i = 0; i < MAX_PLAYERS; i++) {
-        if (players[i].active) {
-            players[i].alive = 1;
-            players[i].length = SNK_START_LEN;
-            players[i].dir = UP;
-            players[i].pending_dir = UP;
-            
-            // Find spawn spot
-            int sy, sx, safe;
-            do {
-                safe = 1;
-                sy = rand() % (HEIGHT - 6) + 3;
-                sx = rand() % (WIDTH - 6) + 3;
-                if(game_map[sy][sx] != 0) safe = 0;
-            } while(!safe);
-
-            players[i].body[0].y = sy;
-            players[i].body[0].x = sx;
-            players[i].body[1].y = sy + 1;
-            players[i].body[1].x = sx;
-            players[i].body[2].y = sy + 2;
-            players[i].body[2].x = sx;
+    for (ssize_t i = 0; i < n; ++i) {
+        if (c->player < 0) {
+            ((unsigned char *)&c->hello)[c->hello_used++] = buffer[i];
+            if (c->hello_used != sizeof(c->hello)) continue;
+            if (ntohl(c->hello.magic) != PROTOCOL_MAGIC || ntohl(c->hello.version) != PROTOCOL_VERSION) {
+                disconnect_client(c); return;
+            }
+            c->hello.name[NAME_SIZE - 1] = '\0';
+            for (int j = 0; c->hello.name[j]; ++j)
+                if ((unsigned char)c->hello.name[j] < 32 || (unsigned char)c->hello.name[j] > 126)
+                    c->hello.name[j] = '?';
+            c->player = game_join(&game, c->hello.name);
+            if (c->player < 0) { disconnect_client(c); return; }
+            printf("Player %d joined: %s\n", c->player + 1, game.players[c->player].name);
+            queue_frame(c, monotonic_ms());
+        } else {
+            if (buffer[i] == QUIT_KEY) { disconnect_client(c); return; }
+            game_input(&game, c->player, buffer[i]);
         }
     }
 }
-
-// --- Thread: Physics Engine ---
-void* physics_loop(void* arg) {
-
-    while (1) {
-        usleep(TICK_RATE_US);
-        frameCnt++;
-
-        int active_count = 0;
-        int alive_count = 0;
-
-        pthread_mutex_lock(&state_mutex);
-        
-        if (game_state == STATE_RUNNING) {
-
-            // 1. Clear old snake positions from map
-            // We rebuild the map dynamic parts every tick to avoid ghosting
-            for(int y=0; y<HEIGHT; y++) {
-                for(int x=0; x<WIDTH; x++) {
-                    if (game_map[y][x] > 0) game_map[y][x] = 0; // Clear snake bodies
-                }
-            }
-            int was = 0;
-            // Countdown runs from 9 to 0.
-            if (frameCnt <= CNT_DOWN_FRAMES) {
-                if (frameCnt == 1) {
-                    // Remember tile value so we can reset
-                    was = game_map[HEIGHT / 2 + 1][WIDTH / 2 + 1];
-                }
-                if (frameCnt % 2) {
-                    // Update and decrement countdown every other frame.
-                    game_map[HEIGHT / 2 + 1][WIDTH / 2 + 1] = (int) '9' - (frameCnt / 2) + 1;
-                }
-                if (frameCnt == CNT_DOWN_FRAMES) {
-                    // On final frame reset original value.
-                    game_map[HEIGHT / 2 + 1][WIDTH / 2 + 1] = was;
-                }
-                //  Skip the move snakes and collisions.
-                goto REDRAW;
-            }
-
-            // 2. Move Snakes
-            for (int i = 0; i < MAX_PLAYERS; i++) {
-                if (!players[i].active) continue;
-                active_count++;
-                if (!players[i].alive) continue;
-                alive_count++;
-
-                Player *p = &players[i];
-                p->dir = p->pending_dir; // Apply buffered input
-
-                // Calculate new head
-                point new_head = p->body[0];
-                switch (p->dir) {
-                    case UP:    new_head.y--; break;
-                    case DOWN:  new_head.y++; break;
-                    case LEFT:  new_head.x--; break;
-                    case RIGHT: new_head.x++; break;
-                }
-
-                // Check collision (Wall, Border, Self, Others)
-                int collision = 0;
-                // Bounds check
-                if (new_head.y <= 0 || new_head.y >= HEIGHT-1 || new_head.x <= 0 || new_head.x >= WIDTH-1) collision = 1;
-                else if (game_map[new_head.y][new_head.x] == WALL) collision = 1;
-                
-                // Check against other snakes (using previous positions) is tricky. 
-                // Simplified: Check against the map "state" isn't fully reliable here because we cleared it.
-                // We must check coordinate against all other snake bodies.
-                for (int j=0; j<MAX_PLAYERS; j++) {
-                    if (!players[j].active || !players[j].alive) continue;
-                    for (int b=0; b < players[j].length; b++) {
-                        if (new_head.x == players[j].body[b].x && new_head.y == players[j].body[b].y) {
-                            collision = 1;
-                        }
-                    }
-                }
-
-                if (collision) {
-                    p->alive = 0; // Snake dies
-                } else {
-                    // Check Fruit
-                    if (game_map[new_head.y][new_head.x] == FRUIT) {
-                        p->length = p->length + SNK_FRUIT_LEN;
-                        spawn_fruit();
-                    }
-
-                    // Move Body
-                    for (int b = p->length - 1; b > 0; b--) {
-                        p->body[b] = p->body[b - 1];
-                    }
-                    p->body[0] = new_head;
-
-                    // Win Condition
-                    if (p->length >= WIN_LENGTH) {
-                        game_state = STATE_GAME_OVER;
-                        winner_id = p->id;
-                    }
-                }
-            }
-
-REDRAW:
-            // 3. Re-draw valid snakes onto map
-            for (int i = 0; i < MAX_PLAYERS; i++) {
-                if (players[i].active && players[i].alive) {
-                    for (int b = 0; b < players[i].length; b++) {
-                        int y = players[i].body[b].y;
-                        int x = players[i].body[b].x;
-                        // Head is positive ID, body is same ID
-                        game_map[y][x] = players[i].color_id; 
-                    }
-                }
-            }
-            
-            // End Game if everyone died
-            if (active_count > 0 && alive_count == 0) {
-                game_state = STATE_GAME_OVER;
-                winner_id = -1; // Draw
-            }
-        }
-
-        // 4. Broadcast Map + Metadata
-        // Format: [State(1)][Winner(4)][Map(size)]
-        
-        int buffer_size = sizeof(int) + sizeof(int) + sizeof(game_map);
-        char *send_buffer = malloc(buffer_size);
-        int offset = 0;
-        
-        memcpy(send_buffer + offset, &game_state, sizeof(int)); offset += sizeof(int);
-        memcpy(send_buffer + offset, &winner_id, sizeof(int)); offset += sizeof(int);
-        memcpy(send_buffer + offset, game_map, sizeof(game_map));
-
-        for (int i = 0; i < MAX_PLAYERS; i++) {
-            if (players[i].active) {
-                if (send(players[i].id, send_buffer, buffer_size, MSG_NOSIGNAL) < 0) {
-                    // Client disconnected during write
-                    printf("Client %d disconnected during broadcast.\n", players[i].id);
-                    close(players[i].id);
-                    players[i].active = 0;
-                }
-            }
-        }
-        free(send_buffer);
-
-        pthread_mutex_unlock(&state_mutex);
-    }
-    return NULL;
+static void send_output(Connection *c) {
+    if (!c->queued) return;
+    ssize_t n = send(c->fd, (char *)&c->output + c->sent, c->queued - c->sent, MSG_NOSIGNAL);
+    if (n > 0) {
+        c->sent += (size_t)n;
+        if (c->sent == c->queued) c->queued = c->sent = 0;
+    } else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) disconnect_client(c);
 }
-
-// --- Thread: Client Input Handler ---
-void* client_handler(void* arg) {
-    int fd = *(int*)arg;
-    free(arg);
-    
-    char name_buffer[32];
-    int n = read(fd, name_buffer, 32);
-    if (n <= 0) { close(fd); return NULL; }
-    name_buffer[n] = '\0'; // Ensure null term (might cut off last char if full)
-
-    pthread_mutex_lock(&state_mutex);
-    int p_index = -1;
-    for (int i = 0; i < MAX_PLAYERS; i++) {
-        if (!players[i].active) {
-            p_index = i;
-            players[i].active = 1;
-            players[i].id = fd;
-            players[i].color_id = i + 1; // 1-based color
-            memcpy(players[i].name, name_buffer, 32);
-            players[i].name[31] = '\0';
-            players[i].alive = 0; // Not alive until game starts
-            printf("Player joined: %s (ID: %d)\n", players[i].name, fd);
-            break;
+int main(int argc, char **argv) {
+    long port = PORT;
+    if (argc > 2) { fprintf(stderr, "Usage: %s [port]\n", argv[0]); return 1; }
+    if (argc == 2) {
+        char *end;
+        port = strtol(argv[1], &end, 10);
+        if (!argv[1][0] || *end || port < 1 || port > 65535) { fprintf(stderr, "Invalid port\n"); return 1; }
+    }
+    signal(SIGPIPE, SIG_IGN); signal(SIGINT, stop); signal(SIGTERM, stop);
+    srand((unsigned int)time(NULL));
+    game_init(&game);
+    for (int i = 0; i < MAX_CONNECTIONS; ++i) clients[i].fd = clients[i].player = -1;
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0) { perror("socket"); return 1; }
+    int one = 1;
+    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in address = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_ANY), .sin_port = htons((uint16_t)port) };
+    if (set_nonblocking(listener) < 0 || bind(listener, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        listen(listener, MAX_CONNECTIONS) < 0) { perror("listen/bind"); close(listener); return 1; }
+    printf("Snake server listening on port %ld\n", port);
+    fflush(stdout);
+    long long next_tick = monotonic_ms() + 1000 / game.tps, next_broadcast = monotonic_ms();
+    while (running) {
+        struct pollfd fds[MAX_CONNECTIONS + 1];
+        fds[0] = (struct pollfd){ .fd = listener, .events = POLLIN };
+        for (int i = 0; i < MAX_CONNECTIONS; ++i)
+            fds[i + 1] = (struct pollfd){ .fd = clients[i].fd, .events = POLLIN | (clients[i].queued ? POLLOUT : 0) };
+        long long now = monotonic_ms(), due = next_tick < next_broadcast ? next_tick : next_broadcast;
+        int timeout = due > now ? (int)(due - now) : 0;
+        if (poll(fds, MAX_CONNECTIONS + 1, timeout) < 0) {
+            if (errno == EINTR) continue;
+            perror("poll"); break;
         }
-    }
-    pthread_mutex_unlock(&state_mutex);
-
-    if (p_index == -1) {
-        write(fd, "FULL", 4);
-        close(fd);
-        return NULL;
-    }
-
-    // Input Loop
-    char key;
-    while (read(fd, &key, 1) > 0) {
-        pthread_mutex_lock(&state_mutex);
-        Player *p = &players[p_index];
-        
-        if (game_state == STATE_WAITING) {
-            if (key == START_KEY && p_index == 0) { // First player is host
-                printf("Game Started by %s\n", p->name);
-                reset_game();
-                game_state = STATE_RUNNING;
+        /* Process only connections represented in this poll snapshot before accepting new ones. */
+        for (int i = 0; i < MAX_CONNECTIONS; ++i) {
+            Connection *c = &clients[i];
+            short events = fds[i + 1].revents;
+            if (c->fd < 0) continue;
+            if (events & (POLLERR | POLLHUP | POLLNVAL)) { disconnect_client(c); continue; }
+            if (events & POLLIN) receive_input(c);
+            if (c->fd >= 0 && (events & POLLOUT)) send_output(c);
+            now = monotonic_ms();
+            if (c->fd >= 0 && ((c->player < 0 && now - c->connected_at >= CONNECTION_TIMEOUT_MS) ||
+                (c->queued && now - c->queued_at >= CONNECTION_TIMEOUT_MS))) disconnect_client(c);
+        }
+        if (fds[0].revents & POLLIN) {
+            /* Bound accepts too, including rejected connections. */
+            for (int k = 0; k < MAX_CONNECTIONS; ++k) {
+                int fd = accept(listener, NULL, NULL);
+                if (fd < 0) break;
+                int slot = -1;
+                for (int i = 0; i < MAX_CONNECTIONS; ++i) if (clients[i].fd < 0) { slot = i; break; }
+                if (slot < 0 || set_nonblocking(fd) < 0) { close(fd); continue; }
+                /* Keep stale snapshots bounded even when a peer stops reading. */
+                int send_buffer = 64 * 1024;
+                setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof(send_buffer));
+                clients[slot].fd = fd;
+                clients[slot].connected_at = monotonic_ms();
             }
-        } else if (game_state == STATE_RUNNING && p->alive) {
-            // Prevent 180 degree turns
-            switch(key) {
-                case UP_KEY:    if(p->dir != DOWN) p->pending_dir = UP; break;
-                case DOWN_KEY:  if(p->dir != UP)   p->pending_dir = DOWN; break;
-                case LEFT_KEY:  if(p->dir != RIGHT) p->pending_dir = LEFT; break;
-                case RIGHT_KEY: if(p->dir != LEFT)  p->pending_dir = RIGHT; break;
-            }
-        } else if (game_state == STATE_GAME_OVER) {
-             if (key == START_KEY && p_index == 0) {
-                 game_state = STATE_WAITING; // Reset to lobby
-             }
         }
-        pthread_mutex_unlock(&state_mutex);
-    }
-
-    // Cleanup
-    pthread_mutex_lock(&state_mutex);
-    printf("Player disconnected: %s\n", players[p_index].name);
-    players[p_index].active = 0;
-    close(fd);
-    
-    // If host leaves, reset game state or assign new host?
-    // For simplicity, if player count is 0, reset state
-    int remaining = 0;
-    for(int i=0; i<MAX_PLAYERS; i++) if(players[i].active) remaining++;
-    if(remaining == 0) game_state = STATE_WAITING;
-    
-    pthread_mutex_unlock(&state_mutex);
-    return NULL;
-}
-
-int main() {
-    signal(SIGPIPE, SIG_IGN); // Ignore broken pipes
-    srand(time(NULL));
-    init_map();
-
-    int server_fd, new_socket;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
-
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Allow port reuse
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
-
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Bind failed");
-        exit(EXIT_FAILURE);
-    }
-
-    if (listen(server_fd, MAX_PLAYERS) < 0) {
-        perror("Listen failed");
-        exit(EXIT_FAILURE);
-    }
-
-    printf("Server started on port %d. Max Score: %d\n", PORT, WIN_LENGTH);
-
-    // Start Physics Thread
-    pthread_t physics_tid;
-    pthread_create(&physics_tid, NULL, physics_loop, NULL);
-
-    while (1) {
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-            perror("Accept failed");
-            continue;
+        now = monotonic_ms();
+        if (now >= next_tick) {
+            game_tick(&game);
+            next_tick = now + 1000 / game.tps;
         }
-
-        int *pclient = malloc(sizeof(int));
-        *pclient = new_socket;
-        pthread_t tid;
-        pthread_create(&tid, NULL, client_handler, pclient);
-        pthread_detach(tid);
+        if (now >= next_broadcast) {
+            for (int i = 0; i < MAX_CONNECTIONS; ++i)
+                if (clients[i].fd >= 0) queue_frame(&clients[i], now);
+            next_broadcast = now + BROADCAST_MS;
+        }
     }
-
+    for (int i = 0; i < MAX_CONNECTIONS; ++i) disconnect_client(&clients[i]);
+    close(listener);
     return 0;
 }

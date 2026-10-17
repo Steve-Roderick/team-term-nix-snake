@@ -1,2 +1,5 @@
 server
 client
+tests/test_game
+tests/test_local
+__pycache__/
